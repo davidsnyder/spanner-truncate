@@ -71,14 +71,6 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 	}
 	fmt.Fprintf(out, "\n")
 
-	if !quiet {
-		if !confirm(out, "Rows in these tables will be deleted. Do you want to continue?") {
-			return nil
-		}
-	} else {
-		fmt.Fprintf(out, "Rows in these tables will be deleted.\n")
-	}
-
 	indexes, err := fetchIndexSchemas(ctx, client)
 	if err != nil {
 		return fmt.Errorf("failed to fetch index schema: %v", err)
@@ -88,6 +80,15 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 	if err != nil {
 		return fmt.Errorf("failed to coordinate: %v", err)
 	}
+
+	if !quiet {
+		if !confirm(out, "Rows in these tables will be deleted. Do you want to continue?") {
+			return nil
+		}
+	} else {
+		fmt.Fprintf(out, "Rows in these tables will be deleted.\n")
+	}
+
 	coordinator.start(ctx)
 
 	// Show progress bars.

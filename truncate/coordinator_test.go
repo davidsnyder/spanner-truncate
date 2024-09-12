@@ -132,7 +132,7 @@ func TestNewCoordinator(t *testing.T) {
 		},
 	} {
 		t.Run(test.desc, func(t *testing.T) {
-			coordinator, err := newCoordinator(test.schemas, test.indexes, nil)
+			coordinator, err := newCoordinator(test.schemas, test.indexes, nil, "true")
 			if test.wantErr {
 				if err == nil {
 					t.Errorf("test wants error, but no error returned")
