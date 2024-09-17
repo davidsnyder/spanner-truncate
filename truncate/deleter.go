@@ -53,7 +53,7 @@ type deleter struct {
 // deleteRows deletes rows from the table using PDML.
 func (d *deleter) deleteRows(ctx context.Context) error {
 	d.status = statusDeleting
-	rawStatement := fmt.Sprintf("DELETE FROM `%s` WHERE `%s`", d.tableName, d.whereClause)
+	rawStatement := fmt.Sprintf("DELETE FROM `%s` WHERE %s", d.tableName, d.whereClause)
 	fmt.Printf("Executing statement `%s`\n", rawStatement)
 	stmt := spanner.NewStatement(rawStatement)
 	_, err := d.client.PartitionedUpdate(ctx, stmt)
