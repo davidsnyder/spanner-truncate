@@ -19,6 +19,7 @@ package truncate
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"cloud.google.com/go/spanner"
@@ -54,7 +55,7 @@ type deleter struct {
 func (d *deleter) deleteRows(ctx context.Context) error {
 	d.status = statusDeleting
 	rawStatement := fmt.Sprintf("DELETE FROM `%s` WHERE %s", d.tableName, d.whereClause)
-	fmt.Printf("Executing statement `%s`\n", rawStatement)
+	log.Printf("Executing statement `%s`\n", rawStatement)
 	stmt := spanner.NewStatement(rawStatement)
 	_, err := d.client.PartitionedUpdate(ctx, stmt)
 	return err

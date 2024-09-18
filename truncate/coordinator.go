@@ -249,7 +249,7 @@ func isAnyTableDeleting(tables []*table) bool {
 	return false
 }
 
-// cascadeDelete marks all of child tables as cascade deleting status.
+// cascadeDelete marks all child tables as cascade deleting status.
 func cascadeDelete(tables []*table) {
 	for _, table := range tables {
 		table.deleter.parentDeletionStarted()

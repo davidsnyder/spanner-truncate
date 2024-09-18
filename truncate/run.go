@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"time"
 
@@ -42,7 +43,7 @@ func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bo
 		return fmt.Errorf("failed to create Cloud Spanner client: %v", err)
 	}
 	defer func() {
-		fmt.Fprintf(out, "Closing spanner client...\n")
+		log.Printf("Closing spanner client...\n")
 		client.Close()
 	}()
 
@@ -55,7 +56,8 @@ func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bo
 // If excludeTables is not empty, those tables are excluded from the deleted tables.
 // This function uses an externally passed Cloud Spanner client.
 func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
-	fmt.Fprintf(out, "Fetching table schema from %s\n", client.DatabaseName())
+	log.SetOutput(out)
+	log.Printf("Fetching table schema from %s\n", client.DatabaseName())
 	schemas, err := fetchTableSchemas(ctx, client)
 	if err != nil {
 		return fmt.Errorf("failed to fetch table schema: %v", err)
@@ -66,10 +68,11 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 		return fmt.Errorf("failed to filter table schema: %v", err)
 	}
 
+	log.Printf("Deleting from the following tables:\n")
 	for _, schema := range schemas {
-		fmt.Fprintf(out, "%s\n", schema.tableName)
+		log.Printf("%s\n", schema.tableName)
 	}
-	fmt.Fprintf(out, "\n")
+	log.Printf("\n")
 
 	indexes, err := fetchIndexSchemas(ctx, client)
 	if err != nil {
@@ -82,11 +85,11 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 	}
 
 	if !quiet {
-		if !confirm(out, "Rows in these tables will be deleted. Do you want to continue?") {
+		if !confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
 			return nil
 		}
 	} else {
-		fmt.Fprintf(out, "Rows in these tables will be deleted.\n")
+		log.Printf("Rows in these tables will be deleted.\n")
 	}
 
 	coordinator.start(ctx)
@@ -114,14 +117,13 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 	time.Sleep(time.Second)
 	progress.Stop()
 
-	fmt.Fprint(out, "\nDone! All rows have been deleted successfully.\n")
+	log.Printf("Done! All rows matching `%s` have been deleted successfully.\n", whereClause)
 	return nil
 }
 
 // confirm returns true if a user confirmed the message, otherwise returns false.
-func confirm(out io.Writer, msg string) bool {
-	fmt.Fprintf(out, "%s [Y/n] ", msg)
-
+func confirm(msg string) bool {
+	log.Printf("%s [Y/n] ", msg)
 	s := bufio.NewScanner(os.Stdin)
 	for {
 		s.Scan()
@@ -131,7 +133,7 @@ func confirm(out io.Writer, msg string) bool {
 		case "n":
 			return false
 		default:
-			fmt.Fprint(out, "Please answer Y or n: ")
+			log.Printf("Please answer Y or n: ")
 		}
 	}
 }
