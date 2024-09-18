@@ -87,7 +87,7 @@ func (d *deleter) startRowCountUpdater(ctx context.Context) {
 }
 
 func (d *deleter) updateRowCount(ctx context.Context) error {
-	stmt := spanner.NewStatement(fmt.Sprintf("SELECT COUNT(*) as count FROM `%s`", d.tableName))
+	stmt := spanner.NewStatement(fmt.Sprintf("SELECT COUNT(*) as count FROM `%s` WHERE %s", d.tableName, d.whereClause))
 	var count int64
 
 	// Use stale read to minimize the impact on the leader replica.
