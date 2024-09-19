@@ -111,7 +111,7 @@ type coordinator struct {
 	errChan chan error
 }
 
-func newCoordinator(schemas []*tableSchema, indexes []*indexSchema, client *spanner.Client) (*coordinator, error) {
+func newCoordinator(schemas []*tableSchema, indexes []*indexSchema, client *spanner.Client, whereClause string) (*coordinator, error) {
 	var tables []*table
 	tableMap := map[string]*table{}
 	for _, schema := range schemas {
@@ -120,8 +120,9 @@ func newCoordinator(schemas []*tableSchema, indexes []*indexSchema, client *span
 			parentTableName:      schema.parentTableName,
 			parentOnDeleteAction: schema.parentOnDeleteAction,
 			deleter: &deleter{
-				tableName: schema.tableName,
-				client:    client,
+				tableName:   schema.tableName,
+				whereClause: whereClause,
+				client:      client,
 			},
 			referencedBy: []*table{},
 		}
@@ -248,7 +249,7 @@ func isAnyTableDeleting(tables []*table) bool {
 	return false
 }
 
-// cascadeDelete marks all of child tables as cascade deleting status.
+// cascadeDelete marks all child tables as cascade deleting status.
 func cascadeDelete(tables []*table) {
 	for _, table := range tables {
 		table.deleter.parentDeletionStarted()

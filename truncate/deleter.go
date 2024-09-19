@@ -19,6 +19,7 @@ package truncate
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"cloud.google.com/go/spanner"
@@ -37,9 +38,10 @@ const (
 
 // deleter deletes all rows from the table.
 type deleter struct {
-	tableName string
-	client    *spanner.Client
-	status    status
+	tableName   string
+	whereClause string
+	client      *spanner.Client
+	status      status
 
 	// Total rows in the table.
 	// Once set, we don't update this number even if new rows are added to the table.
@@ -52,7 +54,9 @@ type deleter struct {
 // deleteRows deletes rows from the table using PDML.
 func (d *deleter) deleteRows(ctx context.Context) error {
 	d.status = statusDeleting
-	stmt := spanner.NewStatement(fmt.Sprintf("DELETE FROM `%s` WHERE true", d.tableName))
+	rawStatement := fmt.Sprintf("DELETE FROM `%s` WHERE %s", d.tableName, d.whereClause)
+	log.Printf("Executing statement `%s`\n", rawStatement)
+	stmt := spanner.NewStatement(rawStatement)
 	_, err := d.client.PartitionedUpdate(ctx, stmt)
 	return err
 }
@@ -84,7 +88,7 @@ func (d *deleter) startRowCountUpdater(ctx context.Context) {
 }
 
 func (d *deleter) updateRowCount(ctx context.Context) error {
-	stmt := spanner.NewStatement(fmt.Sprintf("SELECT COUNT(*) as count FROM `%s`", d.tableName))
+	stmt := spanner.NewStatement(fmt.Sprintf("SELECT COUNT(*) as count FROM `%s` WHERE %s", d.tableName, d.whereClause))
 	var count int64
 
 	// Use stale read to minimize the impact on the leader replica.

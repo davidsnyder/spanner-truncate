@@ -17,10 +17,9 @@
 package truncate
 
 import (
+	"cloud.google.com/go/spanner"
 	"context"
 	"errors"
-
-	"cloud.google.com/go/spanner"
 )
 
 // deleteActionType is action type on parent delete.
@@ -158,7 +157,6 @@ func targetFilterTableSchemas(tables []*tableSchema, targetTables []string) []*t
 	if len(targetTables) == 0 {
 		return tables
 	}
-
 	isTarget := make(map[string]bool, len(tables))
 	for _, t := range targetTables {
 		isTarget[t] = true
