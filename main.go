@@ -36,7 +36,7 @@ type options struct {
 	Quiet         bool   `short:"q" long:"quiet" description:"Disable all interactive prompts."`
 	Tables        string `short:"t" long:"tables" description:"Comma separated table names to be truncated. Default to truncate all tables if not specified."`
 	ExcludeTables string `short:"e" long:"exclude-tables" description:"Comma separated table names to be exempted from truncating. 'tables' and 'exclude-tables' cannot co-exist"`
-	WhereClause   string `short:"w" long:"where" description:"WHERE clause to scope deletion"`
+	WhereClause   string `short:"w" long:"where" description:"(required) WHERE clause to scope deletion"`
 }
 
 const maxTimeout = time.Hour * 24
@@ -47,11 +47,10 @@ func main() {
 		exitf("Invalid options\n")
 	}
 
-	if opts.ProjectID == "" || opts.InstanceID == "" || opts.DatabaseID == "" {
-		exitf("Missing options: -p, -i, -d are required.\n")
+	if opts.ProjectID == "" || opts.InstanceID == "" || opts.DatabaseID == "" || opts.WhereClause == "" {
+		exitf("Missing options: -p, -i, -d, -w are required.\n")
 	}
 
-	var whereClause string
 	var targetTables []string
 	var excludeTables []string
 	if opts.Tables != "" {
@@ -65,17 +64,11 @@ func main() {
 		excludeTables = strings.Split(opts.ExcludeTables, ",")
 	}
 
-	if opts.WhereClause != "" {
-		whereClause = opts.WhereClause
-	} else {
-		whereClause = "true"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
 	defer cancel()
 	go handleInterrupt(cancel)
 
-	if err := truncate.Run(ctx, opts.ProjectID, opts.InstanceID, opts.DatabaseID, opts.Quiet, os.Stdout, whereClause, targetTables, excludeTables); err != nil {
+	if err := truncate.Run(ctx, opts.ProjectID, opts.InstanceID, opts.DatabaseID, opts.Quiet, os.Stdout, opts.WhereClause, targetTables, excludeTables); err != nil {
 		exitf("ERROR: %s", err.Error())
 	}
 }
