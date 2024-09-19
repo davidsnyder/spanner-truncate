@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/spanner"
-	"github.com/gosuri/uiprogress"
+	"github.com/davidsnyder/uiprogress"
 )
 
 // Run starts a routine to delete all rows from the specified database.
@@ -68,12 +68,6 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 		return fmt.Errorf("failed to filter table schema: %v", err)
 	}
 
-	log.Printf("Deleting from the following tables:\n")
-	for _, schema := range schemas {
-		log.Printf("%s\n", schema.tableName)
-	}
-	log.Printf("\n")
-
 	indexes, err := fetchIndexSchemas(ctx, client)
 	if err != nil {
 		return fmt.Errorf("failed to fetch index schema: %v", err)
@@ -84,21 +78,14 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 		return fmt.Errorf("failed to coordinate: %v", err)
 	}
 
-	if !quiet {
-		if !confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
-			return nil
-		}
-	} else {
-		log.Printf("Rows in these tables will be deleted.\n")
+	for _, table := range flattenTables(coordinator.tables) {
+		table.deleter.updateRowCount(ctx)
 	}
-
-	coordinator.start(ctx)
 
 	// Show progress bars.
 	progress := uiprogress.New()
 	progress.SetOut(out)
 	progress.SetRefreshInterval(time.Millisecond * 500)
-	progress.Start()
 	var maxNameLength int
 	for _, schema := range schemas {
 		if l := len(schema.tableName); l > maxNameLength {
@@ -108,6 +95,20 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 	for _, table := range flattenTables(coordinator.tables) {
 		showProgressBar(progress, table, maxNameLength)
 	}
+
+	time.Sleep(time.Second)
+	progress.Print()
+
+	if !quiet {
+		if !confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
+			return nil
+		}
+	} else {
+		log.Printf("Rows in these tables will be deleted.\n")
+	}
+
+	progress.Start()
+	coordinator.start(ctx)
 
 	if err := coordinator.waitCompleted(); err != nil {
 		progress.Stop()
