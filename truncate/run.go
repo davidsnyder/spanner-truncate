@@ -19,15 +19,15 @@ package truncate
 
 import (
 	"bufio"
+	"cloud.google.com/go/spanner"
 	"context"
 	"fmt"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 	"io"
 	"log"
 	"os"
 	"time"
-
-	"cloud.google.com/go/spanner"
-	"github.com/davidsnyder/uiprogress"
 )
 
 // Run starts a routine to delete all rows from the specified database.
@@ -78,26 +78,19 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 		return fmt.Errorf("failed to coordinate: %v", err)
 	}
 
+	log.Println("Fetching row counts from spanner...")
+
 	for _, table := range flattenTables(coordinator.tables) {
 		table.deleter.updateRowCount(ctx)
 	}
 
-	// Show progress bars.
-	progress := uiprogress.New()
-	progress.SetOut(out)
-	progress.SetRefreshInterval(time.Millisecond * 500)
-	var maxNameLength int
-	for _, schema := range schemas {
-		if l := len(schema.tableName); l > maxNameLength {
-			maxNameLength = l
+	p := mpb.New()
+	tables := flattenTables(coordinator.tables)
+	for _, table := range tables {
+		if table.deleter.totalRows > 0 {
+			print(fmt.Sprintf("%s rows from %s\n", formatNumber(table.deleter.totalRows), table.tableName))
 		}
 	}
-	for _, table := range flattenTables(coordinator.tables) {
-		showProgressBar(progress, table, maxNameLength)
-	}
-
-	time.Sleep(time.Second)
-	progress.Print()
 
 	if !quiet {
 		if !confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
@@ -107,16 +100,44 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 		log.Printf("Rows in these tables will be deleted.\n")
 	}
 
-	progress.Start()
 	coordinator.start(ctx)
 
+	for _, table := range tables {
+		if table.deleter.totalRows > 0 {
+			bar := p.AddBar(int64(table.deleter.totalRows),
+				mpb.PrependDecorators(
+					decor.Name(table.tableName, decor.WC{C: decor.DindentRight | decor.DextraSpace}),
+					decor.CountersNoUnit("(%d / %d)", decor.WCSyncWidth),
+				),
+				mpb.AppendDecorators(
+					decor.OnComplete(
+						decor.Percentage(decor.WC{W: 5}), "done",
+					),
+				),
+			)
+			go func() {
+				for {
+					switch table.deleter.status {
+					case statusCompleted:
+						bar.SetCurrent(int64(table.deleter.totalRows))
+					case statusAnalyzing:
+						// nop
+					default:
+						deletedRows := table.deleter.totalRows - table.deleter.remainedRows
+						bar.SetCurrent(int64(deletedRows))
+					}
+
+					time.Sleep(time.Second * 1)
+				}
+			}()
+		}
+	}
+
 	if err := coordinator.waitCompleted(); err != nil {
-		progress.Stop()
 		return fmt.Errorf("failed to delete: %v", err)
 	}
-	// Wait for reflecting the latest progresses to progress bars.
-	time.Sleep(time.Second)
-	progress.Stop()
+
+	p.Wait()
 
 	log.Printf("Done! All rows matching `%s` have been deleted successfully.\n", whereClause)
 	return nil
@@ -137,57 +158,4 @@ func confirm(msg string) bool {
 			log.Printf("Please answer Y or n: ")
 		}
 	}
-}
-
-func showProgressBar(progress *uiprogress.Progress, table *table, maxNameLength int) {
-	bar := progress.AddBar(100)
-	bar.PrependFunc(func(b *uiprogress.Bar) string {
-		elapsed := int(b.TimeElapsed().Seconds())
-		return fmt.Sprintf("%5ds", elapsed)
-	})
-	bar.PrependFunc(func(b *uiprogress.Bar) string {
-		var s string
-		switch table.deleter.status {
-		case statusAnalyzing:
-			s = "analyzing"
-		case statusWaiting:
-			s = "waiting  " // append space for alignment
-		case statusDeleting, statusCascadeDeleting:
-			s = "deleting " // append space for alignment
-		case statusCompleted:
-			s = "completed"
-		}
-		return fmt.Sprintf("%-*s%s", maxNameLength+2, table.tableName+": ", s)
-	})
-	bar.AppendCompleted()
-	bar.AppendFunc(func(b *uiprogress.Bar) string {
-		deletedRows := table.deleter.totalRows - table.deleter.remainedRows
-		return fmt.Sprintf("(%s / %s)", formatNumber(deletedRows), formatNumber(table.deleter.totalRows))
-	})
-
-	// HACK: We call progressBar.Incr() to start timer in the progress bar.
-	bar.Set(-1)
-	bar.Incr()
-
-	// Update progress periodically.
-	go func() {
-		for {
-			switch table.deleter.status {
-			case statusCompleted:
-				// Increment the progress bar until it reaches 100
-				for bar.Incr() {
-				}
-			case statusAnalyzing:
-				// nop
-			default:
-				deletedRows := table.deleter.totalRows - table.deleter.remainedRows
-				target := int(float32(deletedRows) / float32(table.deleter.totalRows) * 100)
-				for i := bar.Current(); i < target; i++ {
-					bar.Incr()
-				}
-			}
-
-			time.Sleep(time.Second * 1)
-		}
-	}()
 }

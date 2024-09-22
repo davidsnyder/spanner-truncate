@@ -35,6 +35,8 @@ const (
 	statusCompleted                     // Status for delete completed.
 )
 
+const tenSeconds = 10 * time.Second
+
 // deleter deletes all rows from the table.
 type deleter struct {
 	tableName   string
@@ -75,12 +77,14 @@ func (d *deleter) startRowCountUpdater(ctx context.Context) {
 			}
 
 			begin := time.Now()
-
 			// Ignore error as it could be a temporal error.
 			d.updateRowCount(ctx)
-
+			sleepDuration := time.Since(begin) * 10
 			// Sleep for a while to minimize the impact on CPU usage caused by SELECT COUNT(*) queries.
-			time.Sleep(time.Since(begin) * 10)
+			if sleepDuration > tenSeconds {
+				sleepDuration = tenSeconds
+			}
+			time.Sleep(sleepDuration)
 		}
 	}()
 }
