@@ -35,7 +35,7 @@ import (
 // Otherwise, it deletes from all tables in the database.
 // If excludeTables is not empty, those tables are excluded from the deleted tables.
 // This function internally creates and uses a Cloud Spanner client.
-func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bool, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
+func Run(ctx context.Context, projectID, instanceID, databaseID string, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
 	database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", projectID, instanceID, databaseID)
 
 	client, err := spanner.NewClient(ctx, database)
@@ -47,7 +47,7 @@ func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bo
 		client.Close()
 	}()
 
-	return RunWithClient(ctx, client, quiet, out, whereClause, targetTables, excludeTables)
+	return RunWithClient(ctx, client, out, whereClause, targetTables, excludeTables)
 }
 
 // RunWithClient starts a routine to delete all rows using the given spanner client.
@@ -55,7 +55,7 @@ func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bo
 // Otherwise, it deletes from all tables in the database.
 // If excludeTables is not empty, those tables are excluded from the deleted tables.
 // This function uses an externally passed Cloud Spanner client.
-func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
+func RunWithClient(ctx context.Context, client *spanner.Client, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
 	log.SetOutput(out)
 	log.Printf("Fetching table schema from %s\n", client.DatabaseName())
 	schemas, err := fetchTableSchemas(ctx, client)
@@ -85,61 +85,62 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 	}
 
 	p := mpb.New()
+	rowsToDelete := 0
 	tables := flattenTables(coordinator.tables)
 	for _, table := range tables {
 		if table.deleter.totalRows > 0 {
+			rowsToDelete += int(table.deleter.totalRows)
 			print(fmt.Sprintf("%s rows from %s\n", formatNumber(table.deleter.totalRows), table.tableName))
 		}
 	}
 
-	if !quiet {
-		if !confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
-			return nil
+	if rowsToDelete > 0 {
+		if confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
+
+			coordinator.start(ctx)
+
+			for _, table := range tables {
+				if table.deleter.totalRows > 0 {
+					bar := p.AddBar(int64(table.deleter.totalRows),
+						mpb.PrependDecorators(
+							decor.Name(table.tableName, decor.WC{C: decor.DindentRight | decor.DextraSpace}),
+							decor.CountersNoUnit("(%d / %d)", decor.WCSyncWidth),
+						),
+						mpb.AppendDecorators(
+							decor.OnComplete(
+								decor.Percentage(decor.WC{W: 5}), "done",
+							),
+						),
+					)
+					go func() {
+						for {
+							switch table.deleter.status {
+							case statusCompleted:
+								bar.SetCurrent(int64(table.deleter.totalRows))
+							case statusAnalyzing:
+								// nop
+							default:
+								deletedRows := table.deleter.totalRows - table.deleter.remainedRows
+								bar.SetCurrent(int64(deletedRows))
+							}
+
+							time.Sleep(time.Second * 1)
+						}
+					}()
+				}
+			}
+
+			if err := coordinator.waitCompleted(); err != nil {
+				return fmt.Errorf("failed to delete: %v", err)
+			}
+
+			p.Wait()
+
+			log.Printf("Done! All rows matching `%s` have been deleted successfully.\n", whereClause)
 		}
 	} else {
-		log.Printf("Rows in these tables will be deleted.\n")
+		log.Printf("No rows found in these tables matching `%s`.\n", whereClause)
 	}
-
-	coordinator.start(ctx)
-
-	for _, table := range tables {
-		if table.deleter.totalRows > 0 {
-			bar := p.AddBar(int64(table.deleter.totalRows),
-				mpb.PrependDecorators(
-					decor.Name(table.tableName, decor.WC{C: decor.DindentRight | decor.DextraSpace}),
-					decor.CountersNoUnit("(%d / %d)", decor.WCSyncWidth),
-				),
-				mpb.AppendDecorators(
-					decor.OnComplete(
-						decor.Percentage(decor.WC{W: 5}), "done",
-					),
-				),
-			)
-			go func() {
-				for {
-					switch table.deleter.status {
-					case statusCompleted:
-						bar.SetCurrent(int64(table.deleter.totalRows))
-					case statusAnalyzing:
-						// nop
-					default:
-						deletedRows := table.deleter.totalRows - table.deleter.remainedRows
-						bar.SetCurrent(int64(deletedRows))
-					}
-
-					time.Sleep(time.Second * 1)
-				}
-			}()
-		}
-	}
-
-	if err := coordinator.waitCompleted(); err != nil {
-		return fmt.Errorf("failed to delete: %v", err)
-	}
-
-	p.Wait()
-
-	log.Printf("Done! All rows matching `%s` have been deleted successfully.\n", whereClause)
 	return nil
 }
 
