@@ -19,15 +19,15 @@ package truncate
 
 import (
 	"bufio"
+	"cloud.google.com/go/spanner"
 	"context"
 	"fmt"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 	"io"
 	"log"
 	"os"
 	"time"
-
-	"cloud.google.com/go/spanner"
-	"github.com/gosuri/uiprogress"
 )
 
 // Run starts a routine to delete all rows from the specified database.
@@ -35,7 +35,7 @@ import (
 // Otherwise, it deletes from all tables in the database.
 // If excludeTables is not empty, those tables are excluded from the deleted tables.
 // This function internally creates and uses a Cloud Spanner client.
-func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bool, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
+func Run(ctx context.Context, projectID, instanceID, databaseID string, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
 	database := fmt.Sprintf("projects/%s/instances/%s/databases/%s", projectID, instanceID, databaseID)
 
 	client, err := spanner.NewClient(ctx, database)
@@ -47,7 +47,7 @@ func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bo
 		client.Close()
 	}()
 
-	return RunWithClient(ctx, client, quiet, out, whereClause, targetTables, excludeTables)
+	return RunWithClient(ctx, client, out, whereClause, targetTables, excludeTables)
 }
 
 // RunWithClient starts a routine to delete all rows using the given spanner client.
@@ -55,7 +55,7 @@ func Run(ctx context.Context, projectID, instanceID, databaseID string, quiet bo
 // Otherwise, it deletes from all tables in the database.
 // If excludeTables is not empty, those tables are excluded from the deleted tables.
 // This function uses an externally passed Cloud Spanner client.
-func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
+func RunWithClient(ctx context.Context, client *spanner.Client, out io.Writer, whereClause string, targetTables, excludeTables []string) error {
 	log.SetOutput(out)
 	log.Printf("Fetching table schema from %s\n", client.DatabaseName())
 	schemas, err := fetchTableSchemas(ctx, client)
@@ -68,12 +68,6 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 		return fmt.Errorf("failed to filter table schema: %v", err)
 	}
 
-	log.Printf("Deleting from the following tables:\n")
-	for _, schema := range schemas {
-		log.Printf("%s\n", schema.tableName)
-	}
-	log.Printf("\n")
-
 	indexes, err := fetchIndexSchemas(ctx, client)
 	if err != nil {
 		return fmt.Errorf("failed to fetch index schema: %v", err)
@@ -84,40 +78,69 @@ func RunWithClient(ctx context.Context, client *spanner.Client, quiet bool, out 
 		return fmt.Errorf("failed to coordinate: %v", err)
 	}
 
-	if !quiet {
-		if !confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
-			return nil
+	log.Println("Fetching row counts from spanner...")
+
+	for _, table := range flattenTables(coordinator.tables) {
+		table.deleter.updateRowCount(ctx)
+	}
+
+	p := mpb.New()
+	rowsToDelete := 0
+	tables := flattenTables(coordinator.tables)
+	for _, table := range tables {
+		if table.deleter.totalRows > 0 {
+			rowsToDelete += int(table.deleter.totalRows)
+			print(fmt.Sprintf("%s rows from %s\n", formatNumber(table.deleter.totalRows), table.tableName))
+		}
+	}
+
+	if rowsToDelete > 0 {
+		if confirm(fmt.Sprintf("Rows in these tables matching `%s` will be deleted. Do you want to continue?", whereClause)) {
+
+			coordinator.start(ctx)
+
+			for _, table := range tables {
+				if table.deleter.totalRows > 0 {
+					bar := p.AddBar(int64(table.deleter.totalRows),
+						mpb.PrependDecorators(
+							decor.Name(table.tableName, decor.WC{C: decor.DindentRight | decor.DextraSpace}),
+							decor.CountersNoUnit("(%d / %d)", decor.WCSyncWidth),
+						),
+						mpb.AppendDecorators(
+							decor.OnComplete(
+								decor.Percentage(decor.WC{W: 5}), "done",
+							),
+						),
+					)
+					go func() {
+						for {
+							switch table.deleter.status {
+							case statusCompleted:
+								bar.SetCurrent(int64(table.deleter.totalRows))
+							case statusAnalyzing:
+								// nop
+							default:
+								deletedRows := table.deleter.totalRows - table.deleter.remainedRows
+								bar.SetCurrent(int64(deletedRows))
+							}
+
+							time.Sleep(time.Second * 1)
+						}
+					}()
+				}
+			}
+
+			if err := coordinator.waitCompleted(); err != nil {
+				return fmt.Errorf("failed to delete: %v", err)
+			}
+
+			p.Wait()
+
+			log.Printf("Done! All rows matching `%s` have been deleted successfully.\n", whereClause)
 		}
 	} else {
-		log.Printf("Rows in these tables will be deleted.\n")
+		log.Printf("No rows found in these tables matching `%s`.\n", whereClause)
 	}
-
-	coordinator.start(ctx)
-
-	// Show progress bars.
-	progress := uiprogress.New()
-	progress.SetOut(out)
-	progress.SetRefreshInterval(time.Millisecond * 500)
-	progress.Start()
-	var maxNameLength int
-	for _, schema := range schemas {
-		if l := len(schema.tableName); l > maxNameLength {
-			maxNameLength = l
-		}
-	}
-	for _, table := range flattenTables(coordinator.tables) {
-		showProgressBar(progress, table, maxNameLength)
-	}
-
-	if err := coordinator.waitCompleted(); err != nil {
-		progress.Stop()
-		return fmt.Errorf("failed to delete: %v", err)
-	}
-	// Wait for reflecting the latest progresses to progress bars.
-	time.Sleep(time.Second)
-	progress.Stop()
-
-	log.Printf("Done! All rows matching `%s` have been deleted successfully.\n", whereClause)
 	return nil
 }
 
@@ -136,57 +159,4 @@ func confirm(msg string) bool {
 			log.Printf("Please answer Y or n: ")
 		}
 	}
-}
-
-func showProgressBar(progress *uiprogress.Progress, table *table, maxNameLength int) {
-	bar := progress.AddBar(100)
-	bar.PrependFunc(func(b *uiprogress.Bar) string {
-		elapsed := int(b.TimeElapsed().Seconds())
-		return fmt.Sprintf("%5ds", elapsed)
-	})
-	bar.PrependFunc(func(b *uiprogress.Bar) string {
-		var s string
-		switch table.deleter.status {
-		case statusAnalyzing:
-			s = "analyzing"
-		case statusWaiting:
-			s = "waiting  " // append space for alignment
-		case statusDeleting, statusCascadeDeleting:
-			s = "deleting " // append space for alignment
-		case statusCompleted:
-			s = "completed"
-		}
-		return fmt.Sprintf("%-*s%s", maxNameLength+2, table.tableName+": ", s)
-	})
-	bar.AppendCompleted()
-	bar.AppendFunc(func(b *uiprogress.Bar) string {
-		deletedRows := table.deleter.totalRows - table.deleter.remainedRows
-		return fmt.Sprintf("(%s / %s)", formatNumber(deletedRows), formatNumber(table.deleter.totalRows))
-	})
-
-	// HACK: We call progressBar.Incr() to start timer in the progress bar.
-	bar.Set(-1)
-	bar.Incr()
-
-	// Update progress periodically.
-	go func() {
-		for {
-			switch table.deleter.status {
-			case statusCompleted:
-				// Increment the progress bar until it reaches 100
-				for bar.Incr() {
-				}
-			case statusAnalyzing:
-				// nop
-			default:
-				deletedRows := table.deleter.totalRows - table.deleter.remainedRows
-				target := int(float32(deletedRows) / float32(table.deleter.totalRows) * 100)
-				for i := bar.Current(); i < target; i++ {
-					bar.Incr()
-				}
-			}
-
-			time.Sleep(time.Second * 1)
-		}
-	}()
 }

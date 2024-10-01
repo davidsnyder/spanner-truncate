@@ -39,11 +39,7 @@ type table struct {
 // isDeletable returns true if the table is ready to be deleted.
 func (t *table) isDeletable() bool {
 	for _, child := range t.childTables {
-		if child.parentOnDeleteAction == deleteActionNoAction && child.deleter.status != statusCompleted {
-			return false
-		}
-		// Partitioned DML may not work perfectly if a child of the target table has global indexes.
-		if child.hasGlobalIndex && child.deleter.status != statusCompleted {
+		if child.deleter.status != statusCompleted {
 			return false
 		}
 		if !child.isDeletable() {

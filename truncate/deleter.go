@@ -19,7 +19,6 @@ package truncate
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"cloud.google.com/go/spanner"
@@ -35,6 +34,8 @@ const (
 	statusCascadeDeleting               // Status for deleting rows by parent in cascaded way.
 	statusCompleted                     // Status for delete completed.
 )
+
+const thirtySeconds = 30 * time.Second
 
 // deleter deletes all rows from the table.
 type deleter struct {
@@ -55,7 +56,6 @@ type deleter struct {
 func (d *deleter) deleteRows(ctx context.Context) error {
 	d.status = statusDeleting
 	rawStatement := fmt.Sprintf("DELETE FROM `%s` WHERE %s", d.tableName, d.whereClause)
-	log.Printf("Executing statement `%s`\n", rawStatement)
 	stmt := spanner.NewStatement(rawStatement)
 	_, err := d.client.PartitionedUpdate(ctx, stmt)
 	return err
@@ -77,12 +77,14 @@ func (d *deleter) startRowCountUpdater(ctx context.Context) {
 			}
 
 			begin := time.Now()
-
 			// Ignore error as it could be a temporal error.
 			d.updateRowCount(ctx)
-
+			sleepDuration := time.Since(begin) * 10
 			// Sleep for a while to minimize the impact on CPU usage caused by SELECT COUNT(*) queries.
-			time.Sleep(time.Since(begin) * 10)
+			if sleepDuration > thirtySeconds {
+				sleepDuration = thirtySeconds
+			}
+			time.Sleep(sleepDuration)
 		}
 	}()
 }
